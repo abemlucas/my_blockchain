@@ -45,7 +45,117 @@ It also includes a built-in **multi-node launcher** so you can spin up several n
 
 ### 1) Environment
 
--Starting a Single Node:
-**python blockchain.py
--Starting X Nodes:
-**python blockchain.py X
+bash
+python -m venv .venv
+
+# Windows
+
+. .venv/Scripts/activate
+
+# macOS/Linux
+
+source .venv/bin/activate
+
+pip install flask requests 2) Start a Single Node
+bash
+Copy code
+python blockchain.py
+
+# serves on http://127.0.0.1:5000
+
+3. Start Multiple Nodes (Supervisor Mode)
+   bash
+   Copy code
+
+# 3 nodes on ports 5000, 5001, 5002
+
+python blockchain.py 3
+The supervisor:
+
+Spawns N node processes on consecutive ports.
+
+Waits until each responds.
+
+Auto-registers all peers with each other.
+Press Ctrl+C in the supervisor terminal to stop them all.
+
+API Endpoints (and how they drive A → Z)
+Base URL per node: http://127.0.0.1:<port>
+
+POST /transactions/new → Add
+Queue a new transaction (IOU) in the node’s mempool.
+
+Example (Windows PowerShell):
+
+powershell
+Copy code
+curl.exe -X POST -H "Content-Type: application/json" `  -d "{\"sender\":\"alice\",\"recipient\":\"bob\",\"amount\":5}"`
+http://127.0.0.1:5000/transactions/new
+Example (macOS/Linux):
+
+bash
+Copy code
+curl -X POST -H "Content-Type: application/json" \
+ -d '{"sender":"alice","recipient":"bob","amount":5}' \
+ http://127.0.0.1:5000/transactions/new
+GET /mine → Mine
+Solve PoW, mint a reward, bundle pending transactions into a new block, link it, append it, and clear the mempool.
+
+bash
+Copy code
+curl http://127.0.0.1:5000/mine
+GET /chain → Inspect
+Return the full chain and its length.
+
+bash
+Copy code
+curl http://127.0.0.1:5000/chain
+POST /nodes/register → Register peers
+Tell a node who its peers are.
+(The supervisor does this automatically.)
+
+Example:
+
+bash
+Copy code
+curl -X POST -H "Content-Type: application/json" \
+ -d '{"nodes":["http://127.0.0.1:5001","http://127.0.0.1:5002"]}' \
+ http://127.0.0.1:5000/nodes/register
+GET /nodes/resolve → Consensus
+Fetch peers’ chains, validate, and adopt the longest valid one.
+
+bash
+Copy code
+curl http://127.0.0.1:5002/nodes/resolve
+Example A → Z Demo
+Launch 3 nodes:
+
+bash
+Copy code
+python blockchain.py 3
+Add transactions:
+
+bash
+Copy code
+curl -X POST -H "Content-Type: application/json" \
+ -d '{"sender":"alice","recipient":"bob","amount":5}' \
+ http://127.0.0.1:5000/transactions/new
+Mine:
+
+bash
+Copy code
+curl http://127.0.0.1:5000/mine
+Inspect:
+
+bash
+Copy code
+curl http://127.0.0.1:5000/chain
+curl http://127.0.0.1:5001/chain
+curl http://127.0.0.1:5002/chain
+Resolve:
+
+bash
+Copy code
+curl http://127.0.0.1:5002/nodes/resolve
+Elevator Pitch
+“This is a Flask-based Proof-of-Work blockchain: transactions queue in a mempool, mining solves a hash-prefix puzzle to seal them into hash-linked blocks, and nodes reconcile by adopting the longest valid chain from peers. One file can run a single node or launch a multi-node network with automatic peer registration.”

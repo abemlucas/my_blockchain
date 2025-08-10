@@ -250,5 +250,92 @@ def register_nodes():
     }
     return jsonify(response), 201
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+def run_single_node(port: int):
+    app.run(host="0.0.0.0", port=port)
+
+def launch_multi_node(n: int, base_port: int):
+    import subprocess, time, requests, os, sys
+
+    def wait_until_up(url, tries=60, delay=0.25):
+        for _ in range(tries):
+            try:
+                requests.get(url, timeout=0.5)
+                return True
+            except Exception:
+                time.sleep(delay)
+        return False
+
+    ports = [base_port + i for i in range(n)]
+    procs = []
+
+    try:
+        # Start N nodes
+        for p in ports:
+            print(f"Starting node on port {p} ...")
+            procs.append(
+                subprocess.Popen([sys.executable, os.path.abspath(__file__), str(1), str(p)])
+            )
+
+        # Wait until each node responds
+        for p in ports:
+            url = f"http://127.0.0.1:{p}/chain"
+            print(f"Waiting for {url} ...")
+            if not wait_until_up(url):
+                raise RuntimeError(f"Node at port {p} failed to start")
+
+        # Register peers
+        all_urls = [f"http://127.0.0.1:{p}" for p in ports]
+        for self_port in ports:
+            peers = [u for u in all_urls if not u.endswith(f":{self_port}")]
+            print(f"Registering {len(peers)} peers on {self_port} ...")
+            r = requests.post(
+                f"http://127.0.0.1:{self_port}/nodes/register",
+                json={"nodes": peers},
+                timeout=3
+            )
+            r.raise_for_status()
+
+        print("\nAll nodes up and networked ✅")
+        first = ports[0]
+        last = ports[-1]
+        print("Try:")
+        print(f"  curl http://127.0.0.1:{first}/chain")
+        print(f"  curl -X POST -H \"Content-Type: application/json\" "
+              f"-d '{{\"sender\":\"a\",\"recipient\":\"b\",\"amount\":3}}' "
+              f"http://127.0.0.1:{first}/transactions/new")
+        print(f"  curl http://127.0.0.1:{first}/mine")
+        print(f"  curl http://127.0.0.1:{last}/nodes/resolve\n")
+        print("Press Ctrl+C here to stop all nodes...")
+
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\nShutting down nodes ...")
+        for p in procs:
+            p.terminate()
+        for p in procs:
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                p.kill()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) == 1:
+        # No extra args → run single node
+        run_single_node(5000)
+    elif len(sys.argv) == 2:
+        # One arg → number of nodes
+        num_nodes = int(sys.argv[1])
+        launch_multi_node(num_nodes, 5000)
+    elif len(sys.argv) == 3:
+        # This is an internal call for multi-node: `python blockchain.py 1 port`
+        port = int(sys.argv[2])
+        run_single_node(port)
+
+

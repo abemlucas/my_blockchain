@@ -6,6 +6,7 @@ from uuid import uuid4
 from flask import Flask, jsonify, request
 from urllib.parse import urlparse
 import requests
+from flask_cors import CORS
 
 class Blockchain(object):
     def __init__(self):
@@ -299,6 +300,7 @@ class Blockchain(object):
                     self.state.update(txn)
 
 app = Flask(__name__)
+CORS(app)
 node_identifier = str(uuid4()).replace('-', '')
 
 # Instantiate the Blockchain

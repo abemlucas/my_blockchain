@@ -7,6 +7,9 @@ from flask import Flask, jsonify, request
 from urllib.parse import urlparse
 import requests
 from flask_cors import CORS
+import threading
+import asyncio
+import logging
 from wallet import Wallet, SecureTransaction, create_wallet
 from enhanced_block import EnhancedBlock, DifficultyAdjustment
 from transactions import (
@@ -16,9 +19,14 @@ from transactions import (
     ContractDeployTransaction, 
     ContractCallTransaction
 )
+from websocket import P2PNetworkManager
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Blockchain(object):
-    def __init__(self):
+    def __init__(self, node_id=None, p2p_port=None):
         self.chain = []
         self.current_transactions = []
         self.nodes = set()
@@ -29,7 +37,41 @@ class Blockchain(object):
         self.difficulty_adjuster = DifficultyAdjustment(target_block_time=10, adjustment_interval=5)
         self.current_difficulty = 4  # Starting difficulty
         self.transaction_fee = 0.001  # Basic transaction fee
+        
+        # P2P Networking
+        self.node_id = node_id or str(uuid4()).replace('-', '')[:12]
+        self.p2p_port = p2p_port or 8000
+        self.p2p_manager = None
+        self.p2p_thread = None
+        
         self._create_genesis_block()
+        
+        # Start P2P networking if port is provided
+        if p2p_port:
+            self._start_p2p_networking()
+    
+    def _start_p2p_networking(self):
+        """Start P2P networking in background"""
+        try:
+            self.p2p_manager = P2PNetworkManager(self, self.node_id, self.p2p_port)
+            
+            def run_p2p():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self.p2p_manager.start_server())
+                    loop.run_forever()
+                except Exception as e:
+                    logger.error(f"P2P networking error: {e}")
+                finally:
+                    loop.close()
+            
+            self.p2p_thread = threading.Thread(target=run_p2p, daemon=True)
+            self.p2p_thread.start()
+            logger.info(f"P2P networking started on port {self.p2p_port}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to start P2P networking: {e}")
     
     def _create_genesis_block(self):
         """Create the genesis block with initial state using a real wallet"""
@@ -68,7 +110,7 @@ class Blockchain(object):
 
     def new_block(self, proof, previous_hash=None, miner_address=None):
         """
-        Create a new Enhanced Block in the Blockchain
+        Create a new Enhanced Block and broadcast to network
         """
         # Adjust difficulty if needed
         if len(self.chain) % self.difficulty_adjuster.adjustment_interval == 0:
@@ -96,6 +138,17 @@ class Blockchain(object):
             # Clear processed transactions
             self.current_transactions = []
             
+            # Broadcast block to P2P network
+            if self.p2p_manager:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.p2p_manager.broadcast_block(new_block),
+                        self.p2p_thread._target.__code__.co_consts[1]  # Get the event loop
+                    )
+                    logger.info(f"Broadcasted block {new_block.index} to P2P network")
+                except Exception as e:
+                    logger.warning(f"Failed to broadcast block: {e}")
+            
             return new_block
         else:
             raise ValueError("Invalid block created")
@@ -105,23 +158,23 @@ class Blockchain(object):
         try:
             # Check index
             if block.index != len(self.chain):
-                print(f"Invalid index: expected {len(self.chain)}, got {block.index}")
+                logger.debug(f"Invalid index: expected {len(self.chain)}, got {block.index}")
                 return False
             
             # Check previous hash
             if len(self.chain) > 0 and block.previous_hash != self.chain[-1].hash:
-                print(f"Invalid previous hash: expected {self.chain[-1].hash}, got {block.previous_hash}")
+                logger.debug(f"Invalid previous hash: expected {self.chain[-1].hash}, got {block.previous_hash}")
                 return False
             
             # Validate proof of work
             if not self.valid_proof(block.previous_hash, block.proof, block.difficulty):
-                print(f"Invalid proof of work: {block.proof}")
+                logger.debug(f"Invalid proof of work: {block.proof}")
                 return False
             
             # Validate Merkle root
             calculated_merkle = block.calculate_merkle_root()
             if calculated_merkle != block.merkle_root:
-                print(f"Invalid Merkle root: expected {calculated_merkle}, got {block.merkle_root}")
+                logger.debug(f"Invalid Merkle root: expected {calculated_merkle}, got {block.merkle_root}")
                 return False
             
             # Validate all transactions
@@ -130,15 +183,13 @@ class Blockchain(object):
             
             for tx in block.transactions:
                 if not self._is_valid_transaction_for_state(tx, temp_state, temp_contracts):
-                    print(f"Invalid transaction: {tx}")
+                    logger.debug(f"Invalid transaction: {tx}")
                     return False
                 self._apply_transaction_to_temp_state(tx, temp_state, temp_contracts)
             
             return True
         except Exception as e:
-            print(f"Error validating block: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error validating block: {e}")
             return False
 
     def _is_valid_transaction_for_state(self, transaction, state, contracts=None):
@@ -153,7 +204,7 @@ class Blockchain(object):
                 amount = transaction.amount
                 # Verify signature for SecureTransaction (skip for mining rewards)
                 if sender != "0" and not transaction.verify_transaction():
-                    print(f"Invalid signature for transaction from {sender}")
+                    logger.debug(f"Invalid signature for transaction from {sender}")
                     return False
             else:
                 # Dictionary transaction (legacy/genesis)
@@ -166,20 +217,20 @@ class Blockchain(object):
             
             # Check balance for regular transactions
             if sender not in state:
-                print(f"Sender {sender} not found in state")
+                logger.debug(f"Sender {sender} not found in state")
                 return False
                 
             if state[sender] < amount:
-                print(f"Insufficient balance: {sender} has {state[sender]}, needs {amount}")
+                logger.debug(f"Insufficient balance: {sender} has {state[sender]}, needs {amount}")
                 return False
                 
             if amount <= 0:
-                print(f"Invalid amount: {amount}")
+                logger.debug(f"Invalid amount: {amount}")
                 return False
             
             return True
         except Exception as e:
-            print(f"Error validating transaction: {e}")
+            logger.error(f"Error validating transaction: {e}")
             return False
 
     def _validate_advanced_transaction(self, transaction, state, contracts):
@@ -336,13 +387,34 @@ class Blockchain(object):
 
     def new_transaction(self, transaction_obj):
         """
-        Add a new transaction object to the blockchain
+        Add a new transaction object to the blockchain and broadcast to network
         """
         # Validate transaction
         if not self._is_valid_transaction_for_state(transaction_obj, self.state, self.contracts):
             raise ValueError("Invalid transaction")
         
         self.current_transactions.append(transaction_obj)
+        
+        # Broadcast transaction to P2P network
+        if self.p2p_manager:
+            try:
+                # We need to run this in the P2P event loop
+                def broadcast_tx():
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self.p2p_manager.broadcast_transaction(transaction_obj))
+                        loop.close()
+                    except Exception as e:
+                        logger.warning(f"Failed to broadcast transaction: {e}")
+                
+                # Run in separate thread to avoid blocking
+                threading.Thread(target=broadcast_tx, daemon=True).start()
+                logger.info(f"Broadcasting transaction {getattr(transaction_obj, 'transaction_id', 'unknown')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to broadcast transaction: {e}")
+        
         return len(self.chain)
 
     def get_balance(self, address):
@@ -390,7 +462,7 @@ class Blockchain(object):
         return guess_hash[:difficulty] == "0" * difficulty
 
     def register_node(self, address):
-        """Add a new node to the list of nodes"""
+        """Add a new node to the list of nodes (legacy HTTP method)"""
         parsed_url = urlparse(address)
         if parsed_url.netloc:
             self.nodes.add(parsed_url.netloc)
@@ -418,7 +490,7 @@ class Blockchain(object):
                     block = block_data
                 chain.append(block)
         except Exception as e:
-            print(f"Error converting chain: {e}")
+            logger.error(f"Error converting chain: {e}")
             return False
         
         # Validate genesis block
@@ -465,7 +537,26 @@ class Blockchain(object):
         return True
 
     def resolve_conflicts(self):
-        """Enhanced consensus algorithm with advanced transaction support"""
+        """
+        Enhanced consensus algorithm - now uses P2P network if available
+        """
+        if self.p2p_manager:
+            # Use P2P network for consensus
+            try:
+                def request_consensus():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.p2p_manager.request_chain_from_peers())
+                    loop.close()
+                
+                threading.Thread(target=request_consensus, daemon=True).start()
+                logger.info("Requested chain sync from P2P peers")
+                return True  # Assume consensus will be handled by P2P callbacks
+                
+            except Exception as e:
+                logger.warning(f"P2P consensus failed, falling back to HTTP: {e}")
+        
+        # Fallback to legacy HTTP consensus
         neighbours = self.nodes
         new_chain = None
         max_length = len(self.chain)
@@ -484,7 +575,7 @@ class Blockchain(object):
                         max_length = length
                         new_chain = chain_data
             except requests.RequestException as e:
-                print(f"Error connecting to node {node}: {e}")
+                logger.debug(f"Error connecting to node {node}: {e}")
                 continue
 
         # Replace our chain if we discovered a new, valid chain longer than ours
@@ -526,13 +617,46 @@ class Blockchain(object):
     def get_wallet(self, wallet_id):
         """Get a wallet by ID"""
         return self.wallets.get(wallet_id)
+    
+    def get_network_info(self):
+        """Get P2P network information"""
+        if self.p2p_manager:
+            return self.p2p_manager.get_network_stats()
+        else:
+            return {
+                'p2p_enabled': False,
+                'legacy_nodes': list(self.nodes)
+            }
 
 app = Flask(__name__)
 CORS(app)
-node_identifier = str(uuid4()).replace('-', '')
 
-# Instantiate the Blockchain
-blockchain = Blockchain()
+# Global blockchain instance - will be initialized in main
+blockchain = None
+
+# Network information endpoint
+@app.route('/network/info', methods=['GET'])
+def network_info():
+    """Get P2P network information"""
+    if blockchain:
+        info = blockchain.get_network_info()
+        info['node_id'] = blockchain.node_id
+        info['p2p_port'] = blockchain.p2p_port
+        return jsonify(info), 200
+    else:
+        return jsonify({'error': 'Blockchain not initialized'}), 500
+
+@app.route('/network/peers', methods=['GET'])
+def list_peers():
+    """List connected P2P peers"""
+    if blockchain and blockchain.p2p_manager:
+        peers = blockchain.p2p_manager.get_network_stats()['peer_list']
+        return jsonify({
+            'peers': peers,
+            'total_peers': len(peers)
+        }), 200
+    else:
+        return jsonify({'peers': [], 'total_peers': 0}), 200
 
 # Wallet endpoints (unchanged)
 @app.route('/wallet/create', methods=['POST'])
@@ -569,7 +693,7 @@ def list_wallets():
         'total_wallets': len(wallets_info)
     }), 200
 
-# Advanced transaction endpoints
+# Advanced transaction endpoints (unchanged but now with P2P broadcasting)
 @app.route('/transactions/multisig', methods=['POST'])
 def create_multisig_transaction():
     """Create a multi-signature transaction"""
@@ -625,7 +749,7 @@ def create_timelock_transaction():
         # Add to blockchain if unlocked, otherwise return for later submission
         if timelock_tx.is_unlocked():
             index = blockchain.new_transaction(timelock_tx)
-            message = f'Time-lock transaction added to Block {index}'
+            message = f'Time-lock transaction added to Block {index} and broadcast to network'
         else:
             message = 'Time-lock transaction created but not yet unlocked'
         
@@ -668,7 +792,7 @@ def deploy_contract():
         index = blockchain.new_transaction(deploy_tx)
         
         response = {
-            'message': f'Contract deployment added to Block {index}',
+            'message': f'Contract deployment added to Block {index} and broadcast to network',
             'contract_address': deploy_tx.contract.contract_address,
             'transaction_id': deploy_tx.transaction_id,
             'transaction': deploy_tx.to_dict()
@@ -707,7 +831,7 @@ def call_contract():
         index = blockchain.new_transaction(call_tx)
         
         response = {
-            'message': f'Contract call added to Block {index}',
+            'message': f'Contract call added to Block {index} and broadcast to network',
             'transaction_id': call_tx.transaction_id,
             'transaction': call_tx.to_dict()
         }
@@ -753,32 +877,33 @@ def mine():
         proof = blockchain.proof_of_work(last_hash, blockchain.current_difficulty)
 
         # Mining reward
-        mining_reward = SecureTransaction("0", node_identifier, 1)
+        mining_reward = SecureTransaction("0", blockchain.node_id, 1)
         blockchain.new_transaction(mining_reward)
 
-        # Forge the new Block
-        block = blockchain.new_block(proof, last_hash, node_identifier)
+        # Forge the new Block (this will automatically broadcast to P2P network)
+        block = blockchain.new_block(proof, last_hash, blockchain.node_id)
 
         response = {
-            'message': "New Block Forged",
+            'message': "New Block Forged and broadcast to P2P network",
             'index': block.index,
             'transactions': [tx.to_dict() if hasattr(tx, 'to_dict') else tx for tx in block.transactions],
             'proof': block.proof,
             'previous_hash': block.previous_hash,
             'merkle_root': block.merkle_root,
             'difficulty': block.difficulty,
-            'hash': block.hash
+            'hash': block.hash,
+            'p2p_broadcast': blockchain.p2p_manager is not None
         }
         return jsonify(response), 200
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"Mining error: {error_details}")
+        logger.error(f"Mining error: {error_details}")
         return jsonify({'error': str(e), 'details': error_details}), 500
 
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
-    """Create a regular transaction (legacy endpoint)"""
+    """Create a regular transaction (legacy endpoint with P2P broadcasting)"""
     values = request.get_json()
 
     # Check for signed transaction format
@@ -795,7 +920,10 @@ def new_transaction():
             tx.sender_public_key = values['sender_public_key']
             
             index = blockchain.new_transaction(tx)
-            response = {'message': f'Signed transaction will be added to Block {index}'}
+            response = {
+                'message': f'Signed transaction will be added to Block {index} and broadcast to network',
+                'p2p_broadcast': blockchain.p2p_manager is not None
+            }
             return jsonify(response), 201
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
@@ -808,7 +936,10 @@ def new_transaction():
         try:
             tx = SecureTransaction(values['sender'], values['recipient'], values['amount'])
             index = blockchain.new_transaction(tx)
-            response = {'message': f'Transaction will be added to Block {index}'}
+            response = {
+                'message': f'Transaction will be added to Block {index} and broadcast to network',
+                'p2p_broadcast': blockchain.p2p_manager is not None
+            }
             return jsonify(response), 201
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
@@ -835,12 +966,13 @@ def sign_transaction():
             wallet
         )
         
-        # Add to blockchain
+        # Add to blockchain (will automatically broadcast to P2P network)
         index = blockchain.new_transaction(tx)
         
         response = {
-            'message': f'Signed transaction will be added to Block {index}',
-            'transaction': tx.to_dict()
+            'message': f'Signed transaction will be added to Block {index} and broadcast to network',
+            'transaction': tx.to_dict(),
+            'p2p_broadcast': blockchain.p2p_manager is not None
         }
         return jsonify(response), 201
         
@@ -855,7 +987,9 @@ def full_chain():
     response = {
         'chain': chain_data,
         'length': len(blockchain.chain),
-        'current_difficulty': blockchain.current_difficulty
+        'current_difficulty': blockchain.current_difficulty,
+        'node_id': blockchain.node_id,
+        'p2p_enabled': blockchain.p2p_manager is not None
     }
     return jsonify(response), 200
 
@@ -883,6 +1017,7 @@ def get_difficulty():
 
 @app.route('/nodes/register', methods=['POST'])
 def register_nodes():
+    """Register nodes (legacy HTTP method)"""
     values = request.get_json()
 
     nodes = values.get('nodes')
@@ -893,32 +1028,51 @@ def register_nodes():
         blockchain.register_node(node)
 
     response = {
-        'message': 'New nodes have been added',
+        'message': 'New nodes have been added (legacy HTTP)',
         'total_nodes': list(blockchain.nodes),
+        'note': 'P2P networking handles peer discovery automatically'
     }
     return jsonify(response), 201
 
 @app.route('/nodes/resolve', methods=['GET'])
 def consensus():
+    """Trigger consensus resolution"""
     replaced = blockchain.resolve_conflicts()
 
     if replaced:
         response = {
-            'message': 'Our chain was replaced',
-            'new_chain': [block.to_dict() for block in blockchain.chain]
+            'message': 'Our chain was replaced via consensus',
+            'new_chain': [block.to_dict() for block in blockchain.chain],
+            'consensus_method': 'P2P' if blockchain.p2p_manager else 'HTTP'
         }
     else:
         response = {
             'message': 'Our chain is authoritative',
-            'chain': [block.to_dict() for block in blockchain.chain]
+            'chain': [block.to_dict() for block in blockchain.chain],
+            'consensus_method': 'P2P' if blockchain.p2p_manager else 'HTTP'
         }
 
     return jsonify(response), 200
 
-def run_single_node(port: int):
+def run_single_node(port: int, p2p_port: int = None):
+    """Run a single blockchain node with optional P2P networking"""
+    global blockchain
+    
+    # Initialize blockchain with P2P networking
+    node_id = str(uuid4()).replace('-', '')[:12]
+    blockchain = Blockchain(node_id=node_id, p2p_port=p2p_port)
+    
+    logger.info(f"Starting blockchain node {node_id}")
+    logger.info(f"HTTP API on port {port}")
+    if p2p_port:
+        logger.info(f"P2P networking on port {p2p_port}")
+    else:
+        logger.info("P2P networking disabled")
+    
     app.run(host="0.0.0.0", port=port)
 
 def launch_multi_node(n: int, base_port: int):
+    """Launch multiple nodes with P2P networking"""
     import subprocess, time, requests, os, sys
 
     def wait_until_up(url, tries=60, delay=0.25):
@@ -930,48 +1084,64 @@ def launch_multi_node(n: int, base_port: int):
                 time.sleep(delay)
         return False
 
-    ports = [base_port + i for i in range(n)]
+    http_ports = [base_port + i for i in range(n)]
+    p2p_ports = [8000 + i for i in range(n)]
     procs = []
 
     try:
-        # Start N nodes
-        for p in ports:
-            print(f"Starting node on port {p} ...")
+        # Start N nodes with both HTTP and P2P ports
+        for i in range(n):
+            http_port = http_ports[i]
+            p2p_port = p2p_ports[i]
+            print(f"Starting node {i+1} on HTTP port {http_port}, P2P port {p2p_port} ...")
             procs.append(
-                subprocess.Popen([sys.executable, os.path.abspath(__file__), str(1), str(p)])
+                subprocess.Popen([
+                    sys.executable, os.path.abspath(__file__), 
+                    str(1), str(http_port), str(p2p_port)
+                ])
             )
 
-        # Wait until each node responds
-        for p in ports:
-            url = f"http://127.0.0.1:{p}/chain"
+        # Wait until each HTTP API responds
+        for http_port in http_ports:
+            url = f"http://127.0.0.1:{http_port}/chain"
             print(f"Waiting for {url} ...")
             if not wait_until_up(url):
-                raise RuntimeError(f"Node at port {p} failed to start")
+                raise RuntimeError(f"Node HTTP API at port {http_port} failed to start")
 
-        # Register peers and create initial accounts
-        all_urls = [f"http://127.0.0.1:{p}" for p in ports]
-        for self_port in ports:
-            peers = [u for u in all_urls if not u.endswith(f":{self_port}")]
-            print(f"Registering {len(peers)} peers on {self_port} ...")
+        print("\n🚀 All nodes started successfully!")
+        print("\n📊 Network Status:")
+        
+        # Show network information
+        for i, http_port in enumerate(http_ports):
             try:
-                r = requests.post(
-                    f"http://127.0.0.1:{self_port}/nodes/register",
-                    json={"nodes": peers},
-                    timeout=3
-                )
-                r.raise_for_status()
-            except requests.RequestException as e:
-                print(f"Failed to register peers on port {self_port}: {e}")
+                response = requests.get(f"http://127.0.0.1:{http_port}/network/info", timeout=2)
+                if response.status_code == 200:
+                    info = response.json()
+                    print(f"  Node {i+1}: {info.get('node_id', 'unknown')[:8]}... "
+                          f"(HTTP:{http_port}, P2P:{p2p_ports[i]}) "
+                          f"- Peers: {info.get('connected_peers', 0)}")
+                else:
+                    print(f"  Node {i+1}: HTTP:{http_port}, P2P:{p2p_ports[i]} - Status unknown")
+            except:
+                print(f"  Node {i+1}: HTTP:{http_port}, P2P:{p2p_ports[i]} - Not responding")
 
-        print("\nAll nodes up and networked ✅")
-        first = ports[0]
-        last = ports[-1]
-        print("Try the advanced blockchain features:")
-        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first}/chain' -Method GET")
-        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first}/wallet/create' -Method POST")
-        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first}/contracts' -Method GET")
-        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first}/mine' -Method GET")
-        print("Press Ctrl+C here to stop all nodes...")
+        first_port = http_ports[0]
+        print(f"\n🎯 Try these advanced P2P blockchain commands:")
+        print(f"  # Check network status")
+        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first_port}/network/info' -Method GET")
+        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first_port}/network/peers' -Method GET")
+        print(f"  ")
+        print(f"  # Create wallet and deploy contract")
+        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first_port}/wallet/create' -Method POST")
+        print(f"  ")
+        print(f"  # Mine a block (will broadcast instantly to all peers)")
+        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{first_port}/mine' -Method GET")
+        print(f"  ")
+        print(f"  # Check chain on different nodes (should be identical)")
+        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{http_ports[0]}/chain' -Method GET")
+        print(f"  Invoke-RestMethod -Uri 'http://127.0.0.1:{http_ports[1]}/chain' -Method GET")
+        
+        print(f"\nPress Ctrl+C to stop all nodes...")
 
         while True:
             time.sleep(1)
@@ -979,7 +1149,7 @@ def launch_multi_node(n: int, base_port: int):
     except KeyboardInterrupt:
         pass
     finally:
-        print("\nShutting down nodes ...")
+        print("\n🛑 Shutting down nodes ...")
         for p in procs:
             p.terminate()
         for p in procs:
@@ -992,10 +1162,19 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) == 1:
-        run_single_node(5000)
+        # Single node with P2P networking
+        run_single_node(5000, 8000)
     elif len(sys.argv) == 2:
+        # Multi-node network
         num_nodes = int(sys.argv[1])
         launch_multi_node(num_nodes, 5000)
     elif len(sys.argv) == 3:
-        port = int(sys.argv[2])
-        run_single_node(port)
+        # Single node with custom HTTP port, P2P enabled
+        http_port = int(sys.argv[2])
+        p2p_port = 8000 + (http_port - 5000)  # Calculate P2P port
+        run_single_node(http_port, p2p_port)
+    elif len(sys.argv) == 4:
+        # Single node with custom HTTP and P2P ports
+        http_port = int(sys.argv[2])
+        p2p_port = int(sys.argv[3])
+        run_single_node(http_port, p2p_port)

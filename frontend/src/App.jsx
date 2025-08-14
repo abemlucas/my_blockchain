@@ -4,7 +4,27 @@ import {
   RefreshCw, Plus, Send, Eye, TrendingUp, Zap, Network, BarChart3, 
   Target, Cpu, Search, Radio, Map, Layers, List 
 } from 'lucide-react';
+// Color palette
+const COLORS = {
+  panel: 'rgba(0,0,0,0.5)',
+  border: 'rgba(255,255,255,0.1)',
+  white: '#ffffff',
+  green: '#00ff88',
+  red: '#ff4444',
+  textMuted: 'rgba(255,255,255,0.4)',
+  textDim: 'rgba(255,255,255,0.7)'
+};
 
+// Badge style helper
+const badge = (bg, color) => ({
+  display: 'inline-block',
+  padding: '4px 8px',
+  borderRadius: 12,
+  background: bg,
+  color: color,
+  fontSize: 12,
+  fontWeight: 600
+});
 const FuturisticBlockchainDashboard = () => {
   const [nodes, setNodes] = useState([]);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -1000,58 +1020,64 @@ const FuturisticBlockchainDashboard = () => {
         </div>
       )}
 
-      {/* Mempool View */}
+
+{/* ===== Mempool View ===== */}
       {activeView === 'mempool' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '20px' }}>
-          <div style={{ ...glassStyle, padding: '25px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h3 style={{ margin: 0, color: '#00ff88', letterSpacing: '1px' }}>⟨ LIVE MEMPOOL ⟩</h3>
-              <div style={{
-                padding: '8px 12px',
-                background: 'rgba(0, 255, 136, 0.1)',
-                border: '1px solid rgba(0, 255, 136, 0.3)',
-                borderRadius: '6px',
-                fontSize: '12px',
-                color: '#00ff88'
-              }}>
-                SIZE: <strong style={{ marginLeft: '6px' }}>{mempool.length}</strong>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
+          <div style={{ 
+            background: COLORS.panel,
+            border: `1px solid ${COLORS.border}`,
+            borderRadius: 16,
+            boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+            padding: 18 
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <h3 style={{ margin: 0 }}>Live Mempool</h3>
+              <div style={badge('rgba(255,255,255,0.06)', COLORS.white)}>
+                Size: <strong style={{ marginLeft: 6 }}>{mempool.length}</strong>
               </div>
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#00ff88' }}>TXID</th>
-                    <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#00ff88' }}>FROM</th>
-                    <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#00ff88' }}>TO</th>
-                    <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#00ff88' }}>AMOUNT</th>
-                    <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#00ff88' }}>FEE</th>
-                    <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#00ff88' }}>TYPE</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: `1px solid ${COLORS.border}` }}>TxID</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: `1px solid ${COLORS.border}` }}>From</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: `1px solid ${COLORS.border}` }}>To</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: `1px solid ${COLORS.border}` }}>Amount</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: `1px solid ${COLORS.border}` }}>Fee</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: `1px solid ${COLORS.border}` }}>Type</th>
                   </tr>
                 </thead>
                 <tbody>
                   {mempool.map((t, i) => (
-                    <tr key={(t.txid || JSON.stringify(t)) + i}>
-                      <td style={{ padding: '12px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', fontFamily: 'monospace', color: '#00ff88' }}>{shortHash(t.txid || '')}</td>
-                      <td style={{ padding: '12px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', fontFamily: 'monospace' }}>{(t.from || t.sender || '').slice(0,12)}</td>
-                      <td style={{ padding: '12px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', fontFamily: 'monospace' }}>{(t.to || t.recipient || '').slice(0,12)}</td>
-                      <td style={{ padding: '12px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>{t.amount}</td>
-                      <td style={{ padding: '12px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>{t.fee ?? 0}</td>
-                      <td style={{ padding: '12px 8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>{t.type || (t.sender === '0' ? 'coinbase' : 'transfer')}</td>
+                    <tr key={(t.txid || JSON.stringify(t)) + i} className="rowPulse">
+                      <td style={{ padding: '10px 6px', borderBottom: `1px solid ${COLORS.border}`, fontFamily: 'monospace', color: COLORS.green }}>{shortHash(t.txid || '')}</td>
+                      <td style={{ padding: '10px 6px', borderBottom: `1px solid ${COLORS.border}`, fontFamily: 'monospace' }}>{(t.from || t.sender || '').slice(0,12)}</td>
+                      <td style={{ padding: '10px 6px', borderBottom: `1px solid ${COLORS.border}`, fontFamily: 'monospace' }}>{(t.to || t.recipient || '').slice(0,12)}</td>
+                      <td style={{ padding: '10px 6px', borderBottom: `1px solid ${COLORS.border}` }}>{t.amount}</td>
+                      <td style={{ padding: '10px 6px', borderBottom: `1px solid ${COLORS.border}` }}>{t.fee ?? 0}</td>
+                      <td style={{ padding: '10px 6px', borderBottom: `1px solid ${COLORS.border}` }}>{t.type || (t.sender === '0' ? 'coinbase' : 'transfer')}</td>
                     </tr>
                   ))}
                   {mempool.length === 0 && (
-                    <tr><td colSpan="6" style={{ padding: '20px', color: '#666', textAlign: 'center' }}>
-                      No mempool data. Ensure your node exposes <code style={{ color: '#00ff88' }}>/mempool</code> or rely on polling after submitting transactions.
+                    <tr><td colSpan="6" style={{ padding: 16, color: COLORS.textMuted }}>
+                      No mempool data. Ensure your node exposes <code style={{ color: COLORS.green }}>/mempool</code> or rely on polling after submitting transactions.
                     </td></tr>
                   )}
                 </tbody>
               </table>
             </div>
-        </div>
-        <div style={{ ...card, padding: 18 }}>
+          </div>
+          <div style={{ 
+            background: COLORS.panel,
+            border: `1px solid ${COLORS.border}`,
+            borderRadius: 16,
+            boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+            padding: 18 
+          }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-              <Radio size={16}/><div style={{ ...subtle }}>Listening for events via WebSocket (if available). Otherwise, the dashboard polls every refresh.</div>
+              <Radio size={16}/><div style={{ color: COLORS.textDim, fontSize: 13 }}>Listening for events via WebSocket (if available). Otherwise, the dashboard polls every refresh.</div>
             </div>
             <div style={{ fontSize: 12, color: COLORS.textMuted }}>
               New mempool arrivals briefly glow; removals log into the Flow timeline.
@@ -1062,12 +1088,18 @@ const FuturisticBlockchainDashboard = () => {
 
       {/* ===== Topology View ===== */}
       {activeView === 'topology' && (
-        <div style={{ ...card, padding: 18 }}>
+        <div style={{ 
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 16,
+          boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+          padding: 18 
+        }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <h3 style={{ margin: 0 }}>Network Topology</h3>
-            <div style={{ ...badge('rgba(255,255,255,0.06)', COLORS.white) }}>
+            {/* <div style={badge('rgba(255,255,255,0.06)', COLORS.white)}>
               {topologyError ? 'Derived' : 'Reported'} • {topology.nodes.length} nodes
-            </div>
+            </div> */}
           </div>
           <div style={{ position: 'relative', height: 460, background: 'rgba(255,255,255,0.02)', borderRadius: 12 }}>
             <svg width="100%" height="100%" viewBox="0 0 1000 460" preserveAspectRatio="xMidYMid meet">
@@ -1109,14 +1141,26 @@ const FuturisticBlockchainDashboard = () => {
 
       {/* ===== Flow View ===== */}
       {activeView === 'flow' && (
-        <div style={{ ...card, padding: 18 }}>
+        <div style={{ 
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 16,
+          boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+          padding: 18 
+        }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <h3 style={{ margin: 0 }}>Live Event Timeline</h3>
-            <div style={{ ...badge('rgba(255,255,255,0.06)', COLORS.white) }}>Newest first</div>
+            <div style={badge('rgba(255,255,255,0.06)', COLORS.white)}>Newest first</div>
           </div>
           <div style={{ maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
             {events.map(e => (
-              <div key={e.id} className={`neonCard ${e.type}`} style={{ ...card, padding: 12 }}>
+              <div key={e.id} className={`neonCard ${e.type}`} style={{ 
+                background: COLORS.panel,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 16,
+                boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+                padding: 12 
+              }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <div style={{ fontWeight: 800, color:

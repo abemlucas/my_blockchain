@@ -83,14 +83,14 @@ class Blockchain(object):
         self.wallets['genesis'] = genesis_wallet
         
         # Initialize accounts for demonstration
-        genesis_state = {genesis_address: 1000000}  # Genesis wallet starts with 1M coins
+        genesis_state = {genesis_address: 1000}  # Genesis wallet starts with 1M coins
         self.state = genesis_state.copy()
         
         # Create genesis transaction
         genesis_tx = {
             'sender': '0',  # Special genesis sender
             'recipient': genesis_address,
-            'amount': 1000000,
+            'amount': 1000,
             'timestamp': time(),
             'type': 'genesis'
         }
@@ -693,6 +693,25 @@ def list_wallets():
         'total_wallets': len(wallets_info)
     }), 200
 
+@app.route('/wallet/<wallet_id>', methods=['GET'])
+def get_wallet_info(wallet_id):
+    """Get wallet information"""
+    try:
+        wallet = blockchain.get_wallet(wallet_id)
+        if not wallet:
+            return jsonify({'error': 'Wallet not found'}), 404
+        
+        response = {
+            'wallet_id': wallet_id,
+            'address': wallet.address,
+            'balance': blockchain.get_balance(wallet.address),
+            'public_key': wallet.public_key_pem.decode()
+        }
+        return jsonify(response), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # Advanced transaction endpoints (unchanged but now with P2P broadcasting)
 @app.route('/transactions/multisig', methods=['POST'])
 def create_multisig_transaction():
@@ -900,50 +919,123 @@ def mine():
         error_details = traceback.format_exc()
         logger.error(f"Mining error: {error_details}")
         return jsonify({'error': str(e), 'details': error_details}), 500
-
+    
+@app.route('/stats', methods=['GET'])
+def get_blockchain_stats():
+    """Get comprehensive blockchain statistics"""
+    try:
+        # Calculate total transactions
+        total_txs = sum(len(block.transactions) for block in blockchain.chain)
+        
+        # Calculate average block time
+        if len(blockchain.chain) > 1:
+            time_diffs = []
+            for i in range(1, len(blockchain.chain)):
+                prev_time = blockchain.chain[i-1].timestamp
+                curr_time = blockchain.chain[i].timestamp
+                time_diffs.append(curr_time - prev_time)
+            avg_block_time = sum(time_diffs) / len(time_diffs)
+        else:
+            avg_block_time = 0
+        
+        # Network stats
+        if hasattr(blockchain, 'get_network_info'):
+            network_info = blockchain.get_network_info()
+        else:
+            network_info = {'p2p_enabled': False, 'connected_peers': 0}
+        
+        response = {
+            'chain_length': len(blockchain.chain),
+            'total_transactions': total_txs,
+            'pending_transactions': len(blockchain.current_transactions),
+            'total_accounts': len(blockchain.state),
+            'current_difficulty': getattr(blockchain, 'current_difficulty', 4),
+            'average_block_time': avg_block_time,
+            'total_supply': sum(blockchain.state.values()),
+            'network_info': network_info,
+            'node_uptime': time() - getattr(blockchain, 'start_time', time()),
+            'last_block_hash': blockchain.last_block.hash if blockchain.chain else None,
+            'last_block_time': blockchain.last_block.timestamp if blockchain.chain else None
+        }
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f"Stats endpoint error: {e}")
+        return jsonify({'error': str(e)}), 500
+    
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
-    """Create a regular transaction (legacy endpoint with P2P broadcasting)"""
-    values = request.get_json()
-
-    # Check for signed transaction format
-    if 'signature' in values and 'sender_public_key' in values:
-        # This is a signed transaction
-        required = ['sender', 'recipient', 'amount', 'signature', 'sender_public_key']
-        if not all(k in values for k in required):
-            return jsonify({'error': 'Missing values for signed transaction'}), 400
-
-        try:
-            # Create SecureTransaction object
-            tx = SecureTransaction(values['sender'], values['recipient'], values['amount'])
-            tx.signature = values['signature']
-            tx.sender_public_key = values['sender_public_key']
-            
-            index = blockchain.new_transaction(tx)
-            response = {
-                'message': f'Signed transaction will be added to Block {index} and broadcast to network',
-                'p2p_broadcast': blockchain.p2p_manager is not None
-            }
-            return jsonify(response), 201
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
-    else:
-        # Legacy unsigned transaction (for backward compatibility)
+    """Enhanced transaction endpoint with better error handling"""
+    try:
+        values = request.get_json()
+        
+        # Validate required fields
         required = ['sender', 'recipient', 'amount']
         if not all(k in values for k in required):
-            return jsonify({'error': 'Missing values'}), 400
-
+            return jsonify({
+                'error': 'Missing values',
+                'required': required,
+                'received': list(values.keys()) if values else []
+            }), 400
+        
+        # Validate amount
         try:
-            tx = SecureTransaction(values['sender'], values['recipient'], values['amount'])
-            index = blockchain.new_transaction(tx)
-            response = {
-                'message': f'Transaction will be added to Block {index} and broadcast to network',
-                'p2p_broadcast': blockchain.p2p_manager is not None
+            amount = float(values['amount'])
+            if amount <= 0:
+                return jsonify({'error': 'Amount must be positive'}), 400
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid amount format'}), 400
+        
+        # Check if transaction is valid before adding
+        sender = values['sender']
+        recipient = values['recipient']
+        
+        # Check sufficient balance (skip for genesis sender "0")
+        if sender != "0":
+            sender_balance = blockchain.get_balance(sender)
+            if sender_balance < amount:
+                return jsonify({
+                    'error': 'Insufficient balance',
+                    'sender_balance': sender_balance,
+                    'requested_amount': amount,
+                    'deficit': amount - sender_balance
+                }), 400
+        
+        # Create transaction
+        if hasattr(values, 'signature') and hasattr(values, 'sender_public_key'):
+            # Signed transaction
+            transaction = SecureTransaction(sender, recipient, amount)
+            transaction.signature = values['signature']
+            transaction.sender_public_key = values['sender_public_key']
+        else:
+            # Simple transaction
+            transaction = {
+                'sender': sender,
+                'recipient': recipient,
+                'amount': amount,
+                'timestamp': time(),
+                'transaction_id': str(uuid4())[:8]
             }
-            return jsonify(response), 201
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
-
+        
+        # Add to mempool
+        index = blockchain.new_transaction(transaction)
+        
+        response = {
+            'message': f'Transaction will be added to Block {index}',
+            'transaction': transaction if isinstance(transaction, dict) else transaction.to_dict(),
+            'block_index': index,
+            'mempool_size': len(blockchain.current_transactions),
+            'p2p_broadcast': blockchain.p2p_manager is not None
+        }
+        return jsonify(response), 201
+        
+    except Exception as e:
+        logger.error(f"Transaction creation error: {e}")
+        return jsonify({
+            'error': str(e),
+            'type': type(e).__name__
+        }), 500
+    
 @app.route('/transactions/sign', methods=['POST'])
 def sign_transaction():
     """Sign a transaction with a wallet"""
@@ -1053,6 +1145,133 @@ def consensus():
         }
 
     return jsonify(response), 200
+
+@app.route('/mempool', methods=['GET'])
+def get_mempool():
+    """Get current mempool (pending transactions)"""
+    try:
+        # Convert transaction objects to dictionaries for JSON serialization
+        mempool_data = []
+        for tx in blockchain.current_transactions:
+            if hasattr(tx, 'to_dict'):
+                tx_dict = tx.to_dict()
+            else:
+                tx_dict = dict(tx) if isinstance(tx, dict) else {
+                    'sender': getattr(tx, 'sender', ''),
+                    'recipient': getattr(tx, 'recipient', ''),
+                    'amount': getattr(tx, 'amount', 0),
+                    'timestamp': getattr(tx, 'timestamp', time()),
+                    'transaction_id': getattr(tx, 'transaction_id', str(uuid4())[:8])
+                }
+            
+            # Ensure consistent field names for frontend
+            tx_dict['txid'] = tx_dict.get('transaction_id', str(uuid4())[:8])
+            tx_dict['from'] = tx_dict.get('sender', '')
+            tx_dict['to'] = tx_dict.get('recipient', '')
+            tx_dict['fee'] = tx_dict.get('fee', 0)
+            tx_dict['type'] = 'transfer' if tx_dict.get('sender') != '0' else 'coinbase'
+            
+            mempool_data.append(tx_dict)
+        
+        response = {
+            'txs': mempool_data,
+            'count': len(mempool_data),
+            'size_bytes': sum(len(json.dumps(tx)) for tx in mempool_data)
+        }
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f"Mempool endpoint error: {e}")
+        return jsonify({'txs': [], 'count': 0, 'size_bytes': 0}), 200
+
+@app.route('/topology', methods=['GET'])
+def get_topology():
+    """Get network topology"""
+    try:
+        # Get network info
+        if hasattr(blockchain, 'get_network_info'):
+            network_info = blockchain.get_network_info()
+        else:
+            network_info = {'p2p_enabled': False, 'legacy_nodes': []}
+        
+        # Create nodes list
+        nodes = []
+        edges = []
+        
+        # Add current node
+        current_port = request.environ.get('SERVER_PORT', '5000')
+        current_node = {
+            'id': blockchain.node_id,
+            'url': f'http://127.0.0.1:{current_port}',
+            'status': 'online',
+            'label': f'Node {blockchain.node_id}',
+            'index': 0
+        }
+        nodes.append(current_node)
+        
+        # Add known peers
+        if blockchain.p2p_manager:
+            peer_info = network_info.get('peer_list', [])
+            for i, peer in enumerate(peer_info):
+                peer_node = {
+                    'id': peer.get('node_id', f'peer_{i}'),
+                    'url': f"http://127.0.0.1:{peer.get('port', 5000 + i + 1)}",
+                    'status': 'online' if peer.get('connected', False) else 'offline',
+                    'label': f"Peer {peer.get('node_id', i+1)}",
+                    'index': i + 1
+                }
+                nodes.append(peer_node)
+                
+                # Create edge from current node to peer
+                edges.append({
+                    'from': blockchain.node_id,
+                    'to': peer.get('node_id', f'peer_{i}')
+                })
+        else:
+            # Legacy HTTP nodes
+            legacy_nodes = network_info.get('legacy_nodes', [])
+            for i, node_addr in enumerate(legacy_nodes):
+                try:
+                    # Extract port from address
+                    port = int(node_addr.split(':')[-1]) if ':' in node_addr else 5000 + i + 1
+                    peer_node = {
+                        'id': f'legacy_{port}',
+                        'url': f'http://{node_addr}',
+                        'status': 'unknown',
+                        'label': f'Legacy {port}',
+                        'index': i + 1
+                    }
+                    nodes.append(peer_node)
+                    
+                    # Create edge
+                    edges.append({
+                        'from': blockchain.node_id,
+                        'to': f'legacy_{port}'
+                    })
+                except:
+                    continue
+        
+        response = {
+            'nodes': nodes,
+            'edges': edges,
+            'timestamp': time()
+        }
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f"Topology endpoint error: {e}")
+        # Return minimal topology with just current node
+        return jsonify({
+            'nodes': [{
+                'id': getattr(blockchain, 'node_id', 'node_1'),
+                'url': f'http://127.0.0.1:5000',
+                'status': 'online',
+                'label': 'Current Node',
+                'index': 0
+            }],
+            'edges': [],
+            'timestamp': time()
+        }), 200
 
 def run_single_node(port: int, p2p_port: int = None):
     """Run a single blockchain node with optional P2P networking"""

@@ -89,8 +89,10 @@ class P2PNetworkManager:
         # Message handling
         self.seen_messages: Set[str] = set()  # Prevent message loops
         self.message_handlers = {
-            'new_transaction': self._handle_new_transaction,
-            'new_block': self._handle_new_block,
+            'transaction': self._handle_new_transaction,      
+            'block': self._handle_new_block,                  
+            'new_transaction': self._handle_new_transaction,  
+            'new_block': self._handle_new_block,              
             'peer_discovery': self._handle_peer_discovery,
             'chain_request': self._handle_chain_request,
             'chain_response': self._handle_chain_response,
@@ -186,18 +188,24 @@ class P2PNetworkManager:
                     self.connected_peers.discard(peer_id)
     
     async def _process_message(self, message: P2PMessage, websocket):
-        """Process incoming P2P message"""
+        """Process incoming P2P message with enhanced debugging"""
         # Avoid processing the same message twice (gossip loop prevention)
         if message.message_id in self.seen_messages:
+            logger.debug(f"Skipping duplicate message: {message.message_id}")
             return
         
         self.seen_messages.add(message.message_id)
         self.messages_received += 1
         
+        # ADD THIS DEBUG LOGGING
+        logger.info(f"Processing P2P message: type='{message.type}', sender='{message.sender_id}'")
+        logger.debug(f"Message data keys: {list(message.data.keys()) if isinstance(message.data, dict) else 'Not a dict'}")
+        
         # Handle the message
         handler = self.message_handlers.get(message.type)
         if handler:
             try:
+                logger.info(f"Calling handler for message type: {message.type}")
                 await handler(message, websocket)
                 
                 # Increase sender's reputation for valid messages
@@ -206,14 +214,17 @@ class P2PNetworkManager:
                     
             except Exception as e:
                 logger.error(f"Error handling {message.type}: {e}")
+                logger.error(f"Full error traceback:", exc_info=True)  # This will show the full stack trace
                 # Decrease sender's reputation for invalid messages
                 if message.sender_id in self.peers:
                     self.peers[message.sender_id].decrease_reputation()
         else:
             logger.warning(f"Unknown message type: {message.type}")
+            logger.warning(f"Available handlers: {list(self.message_handlers.keys())}")
         
         # Gossip: Forward message to other peers (except sender)
         await self._gossip_message(message, exclude_peer=message.sender_id)
+
     
     async def _gossip_message(self, message: P2PMessage, exclude_peer: str = None):
         """Forward message to other connected peers (gossip protocol)"""
@@ -365,67 +376,206 @@ class P2PNetworkManager:
                 logger.error(f"Error cleaning old messages: {e}")
                 await asyncio.sleep(300)
     
-    # Message Handlers
     async def _handle_new_transaction(self, message: P2PMessage, websocket):
-        """Handle incoming transaction broadcast"""
+        """Handle incoming transaction broadcast with better error handling"""
         try:
-            from advanced_transactions import (
-                MultiSigTransaction, TimeLockTransaction, 
-                ContractDeployTransaction, ContractCallTransaction
-            )
+            logger.info(f"Received transaction from peer {message.sender_id}")
             
             tx_data = message.data
+            logger.debug(f"Transaction data keys: {list(tx_data.keys()) if isinstance(tx_data, dict) else 'Not a dict'}")
+            
+            # Import all necessary transaction types
+            try:
+                from transactions import (
+                    MultiSigTransaction, TimeLockTransaction, 
+                    ContractDeployTransaction, ContractCallTransaction
+                )
+                from wallet import SecureTransaction
+            except ImportError as e:
+                logger.error(f"Failed to import transaction classes: {e}")
+                return
+            
             tx_type = tx_data.get('transaction_type')
+            logger.info(f"Transaction type: {tx_type}")
             
             # Reconstruct transaction object based on type
-            if tx_type == 'multisig':
-                tx = MultiSigTransaction.from_dict(tx_data)
-            elif tx_type == 'timelock':
-                tx = TimeLockTransaction.from_dict(tx_data)
-            elif tx_type == 'contract_deploy':
-                tx = ContractDeployTransaction.from_dict(tx_data)
-            elif tx_type == 'contract_call':
-                tx = ContractCallTransaction.from_dict(tx_data)
-            else:
-                # Regular SecureTransaction
-                from wallet import SecureTransaction
-                tx = SecureTransaction.from_dict(tx_data)
+            try:
+                if tx_type == 'multisig':
+                    tx = MultiSigTransaction.from_dict(tx_data)
+                elif tx_type == 'timelock':
+                    tx = TimeLockTransaction.from_dict(tx_data)
+                elif tx_type == 'contract_deploy':
+                    tx = ContractDeployTransaction.from_dict(tx_data)
+                elif tx_type == 'contract_call':
+                    tx = ContractCallTransaction.from_dict(tx_data)
+                else:
+                    # Regular SecureTransaction or simple dict transaction
+                    if 'signature' in tx_data and 'sender_public_key' in tx_data:
+                        tx = SecureTransaction.from_dict(tx_data)
+                    else:
+                        # Simple dictionary transaction
+                        tx = tx_data
+                        
+                logger.info(f"Successfully reconstructed transaction object")
+                
+            except Exception as e:
+                logger.error(f"Failed to reconstruct transaction: {e}")
+                logger.debug(f"Transaction data was: {tx_data}")
+                return
+            
+            # Check if transaction already exists
+            tx_id = getattr(tx, 'transaction_id', None) or tx_data.get('transaction_id', str(tx))
+            existing_tx_ids = [
+                getattr(existing_tx, 'transaction_id', None) or 
+                (existing_tx.get('transaction_id') if isinstance(existing_tx, dict) else str(existing_tx))
+                for existing_tx in self.blockchain.current_transactions
+            ]
+            
+            if tx_id in existing_tx_ids:
+                logger.debug(f"Transaction {tx_id} already in mempool, skipping")
+                return
             
             # Add to blockchain if valid and not already present
-            if tx not in self.blockchain.current_transactions:
-                self.blockchain.new_transaction(tx)
-                logger.info(f"Added transaction from network: {tx.transaction_id}")
+            try:
+                self.blockchain.current_transactions.append(tx)
+                logger.info(f"SUCCESS: Added transaction to mempool. Mempool size: {len(self.blockchain.current_transactions)}")
+                
+            except Exception as e:
+                logger.error(f"Failed to add transaction to blockchain: {e}")
+                raise
             
         except Exception as e:
-            logger.error(f"Error handling new transaction: {e}")
+            logger.error(f"Critical error handling transaction from {message.sender_id}: {e}")
+            logger.error(f"Full error traceback:", exc_info=True)
             raise
     
     async def _handle_new_block(self, message: P2PMessage, websocket):
-        """Handle incoming block broadcast"""
+        """Handle incoming block broadcast with better error handling"""
         try:
             from enhanced_block import EnhancedBlock
             
             block_data = message.data
-            block = EnhancedBlock.from_dict(block_data)
+            logger.info(f"Received block from peer {message.sender_id}: Block #{block_data.get('index', 'unknown')}")
+            logger.debug(f"Block data structure: {list(block_data.keys()) if isinstance(block_data, dict) else 'Not a dict'}")
             
-            # Validate and potentially add block
-            if self.blockchain._validate_new_block(block):
-                # Apply transactions and add block
-                for tx in block.transactions:
-                    self.blockchain._update_state_with_transaction(tx)
-                
-                self.blockchain.chain.append(block)
-                self.blockchain.current_transactions = []
-                
-                logger.info(f"Added block from network: {block.index}")
+            # Convert to EnhancedBlock object
+            if isinstance(block_data, dict):
+                try:
+                    new_block = EnhancedBlock.from_dict(block_data)
+                    logger.info(f"Successfully converted block data to EnhancedBlock object")
+                except Exception as e:
+                    logger.error(f"Failed to convert block data to EnhancedBlock: {e}")
+                    logger.debug(f"Block data was: {block_data}")
+                    return
             else:
-                logger.warning(f"Rejected invalid block {block.index} from {message.sender_id}")
-                raise ValueError("Invalid block")
+                new_block = block_data
+            
+            current_chain_length = len(self.blockchain.chain)
+            logger.info(f"Current chain length: {current_chain_length}, Received block index: {new_block.index}")
+            
+            # Check if this block extends our chain
+            if new_block.index == current_chain_length:
+                # This should be the next block
+                if new_block.previous_hash == self.blockchain.last_block.hash:
+                    
+                    # Validate the block
+                    if self._validate_received_block(new_block):
+                        logger.info(f"Block validation successful. Adding block #{new_block.index} to chain")
+                        
+                        # Apply transactions to update state
+                        for tx in new_block.transactions:
+                            if self._is_valid_transaction_for_current_state(tx):
+                                self.blockchain._update_state_with_transaction(tx)
+                            else:
+                                logger.warning(f"Invalid transaction in received block: {tx}")
+                                return
+                        
+                        # Add block to chain
+                        self.blockchain.chain.append(new_block)
+                        
+                        # Clear matching transactions from mempool
+                        self._remove_mined_transactions(new_block.transactions)
+                        
+                        logger.info(f"SUCCESS: Added block #{new_block.index}. Chain length now: {len(self.blockchain.chain)}")
+                        
+                    else:
+                        logger.warning(f"Block validation failed for block #{new_block.index} from {message.sender_id}")
+                else:
+                    logger.warning(f"Block {new_block.index} doesn't connect to our chain. Expected prev_hash: {self.blockchain.last_block.hash}, got: {new_block.previous_hash}")
+            
+            elif new_block.index > current_chain_length:
+                # We're behind - request chain sync
+                logger.info(f"Received block #{new_block.index} but our chain is only {current_chain_length}. Requesting chain sync.")
+                await self.request_chain_from_peers()
+            
+            else:
+                # Old block, ignore
+                logger.debug(f"Received old block #{new_block.index}, ignoring")
+                
+        except Exception as e:
+            logger.error(f"Critical error handling block from {message.sender_id}: {e}")
+            logger.error(f"Full error traceback:", exc_info=True)
+
+    def _validate_received_block(self, block):
+        """Validate a block received from P2P network"""
+        try:
+            # Check proof of work
+            if not self.blockchain.valid_proof(block.previous_hash, block.proof, block.difficulty):
+                logger.warning(f"Invalid proof of work for block {block.index}")
+                return False
+            
+            # Check merkle root
+            if block.merkle_root != block.calculate_merkle_root():
+                logger.warning(f"Invalid merkle root for block {block.index}")
+                return False
+            
+            # Validate all transactions in the block
+            for tx in block.transactions:
+                if not self._is_valid_transaction_for_current_state(tx):
+                    logger.warning(f"Invalid transaction in block {block.index}")
+                    return False
+            
+            return True
             
         except Exception as e:
-            logger.error(f"Error handling new block: {e}")
-            raise
-    
+            logger.error(f"Error validating block: {e}")
+            return False
+
+    def _is_valid_transaction_for_current_state(self, transaction):
+        """Check if transaction is valid against current blockchain state"""
+        try:
+            return self.blockchain._is_valid_transaction_for_state(transaction, self.blockchain.state)
+        except Exception as e:
+            logger.error(f"Error validating transaction: {e}")
+            return False
+
+    def _remove_mined_transactions(self, mined_transactions):
+        """Remove mined transactions from mempool"""
+        try:
+            # Convert mined transactions to comparable format
+            mined_tx_ids = set()
+            for tx in mined_transactions:
+                if hasattr(tx, 'transaction_id'):
+                    mined_tx_ids.add(tx.transaction_id)
+                elif isinstance(tx, dict) and 'transaction_id' in tx:
+                    mined_tx_ids.add(tx['transaction_id'])
+            
+            # Remove matching transactions from mempool
+            original_mempool_size = len(self.blockchain.current_transactions)
+            self.blockchain.current_transactions = [
+                tx for tx in self.blockchain.current_transactions
+                if not (
+                    (hasattr(tx, 'transaction_id') and tx.transaction_id in mined_tx_ids) or
+                    (isinstance(tx, dict) and tx.get('transaction_id') in mined_tx_ids)
+                )
+            ]
+            
+            removed_count = original_mempool_size - len(self.blockchain.current_transactions)
+            if removed_count > 0:
+                logger.info(f"Removed {removed_count} mined transactions from mempool")
+                
+        except Exception as e:
+            logger.error(f"Error removing mined transactions: {e}")
     async def _handle_peer_discovery(self, message: P2PMessage, websocket):
         """Handle peer discovery messages"""
         data = message.data

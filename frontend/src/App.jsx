@@ -56,7 +56,7 @@ const FuturisticBlockchainDashboard = () => {
 
   // Default nodes configuration (20 nodes like original)
   const DEFAULT_NODES = useMemo(() =>
-    Array.from({ length: 20 }, (_, i) => {
+    Array.from({ length: 3 }, (_, i) => {
       const port = 5000 + i;
       return { url: `http://127.0.0.1:${port}`, name: `Node ${i + 1}`, port };
     }), []
@@ -122,14 +122,32 @@ const FuturisticBlockchainDashboard = () => {
     const updatedNodes = await Promise.all(
       DEFAULT_NODES.map(async (node) => {
         try {
-          const [chainResponse, stateResponse] = await Promise.all([
-            fetch(`${node.url}/chain`, { timeout: 5000 }),
-            fetch(`${node.url}/state`, { timeout: 5000 })
+          // Add timeout to fetch requests
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+          const [chainResponse, stateResponse, statsResponse] = await Promise.all([
+            fetch(`${node.url}/chain`, { 
+              signal: controller.signal,
+              headers: { 'Accept': 'application/json' }
+            }),
+            fetch(`${node.url}/state`, { 
+              signal: controller.signal,
+              headers: { 'Accept': 'application/json' }
+            }),
+            fetch(`${node.url}/stats`, { 
+              signal: controller.signal,
+              headers: { 'Accept': 'application/json' }
+            }).catch(() => null) // Stats is optional
           ]);
+
+          clearTimeout(timeoutId);
 
           if (chainResponse.ok && stateResponse.ok) {
             const chainData = await chainResponse.json();
             const stateData = await stateResponse.json();
+            const statsData = statsResponse?.ok ? await statsResponse.json() : {};
+
             return {
               ...node,
               status: 'online',
@@ -138,16 +156,21 @@ const FuturisticBlockchainDashboard = () => {
               state: stateData.state || {},
               error: null,
               lastUpdated: new Date(),
-              peers: Math.floor(Math.random() * 8) + 2,
-              hashRate: Math.floor(Math.random() * 1000) + 100,
-              lastBlockTime: Date.now() - Math.floor(Math.random() * 300000)
+              peers: statsData.network_info?.connected_peers || Math.floor(Math.random() * 8) + 2,
+              hashRate: statsData.total_transactions || Math.floor(Math.random() * 1000) + 100,
+              lastBlockTime: statsData.last_block_time ? 
+                new Date(statsData.last_block_time * 1000).getTime() : 
+                Date.now() - Math.floor(Math.random() * 300000),
+              difficulty: chainData.current_difficulty || 4,
+              totalTransactions: statsData.total_transactions || 0,
+              pendingTransactions: statsData.pending_transactions || 0
             };
           }
           throw new Error(`HTTP ${chainResponse.status}`);
         } catch (error) {
           return {
             ...node,
-            status: 'offline',
+            status: error.name === 'AbortError' ? 'timeout' : 'offline',
             chain: [],
             chainLength: 0,
             state: {},
@@ -155,7 +178,10 @@ const FuturisticBlockchainDashboard = () => {
             lastUpdated: new Date(),
             peers: 0,
             hashRate: 0,
-            lastBlockTime: null
+            lastBlockTime: null,
+            difficulty: 4,
+            totalTransactions: 0,
+            pendingTransactions: 0
           };
         }
       })
@@ -212,10 +238,24 @@ const FuturisticBlockchainDashboard = () => {
 
   const fetchMempool = async (nodeUrl) => {
     try {
-      const res = await fetch(`${nodeUrl}/mempool`, { timeout: 4000 });
-      if (!res.ok) throw new Error('No mempool endpoint');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      
+      const res = await fetch(`${nodeUrl}/mempool`, { 
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!res.ok) {
+        console.log('Mempool endpoint not available, using fallback');
+        setMempool([]);
+        return;
+      }
+      
       const data = await res.json();
-      const txs = Array.isArray(data) ? data : (data.txs || []);
+      const txs = data.txs || [];
 
       // Detect changes for events
       const prev = prevMempoolRef.current;
@@ -223,43 +263,87 @@ const FuturisticBlockchainDashboard = () => {
       
       txs.forEach(t => {
         const id = t.txid || JSON.stringify(t);
-        if (!prev.has(id)) pushEvent({ 
-          type: 'tx', 
-          level: 'info', 
-          message: 'Tx received in mempool', 
-          meta: { id } 
-        });
+        if (!prev.has(id)) {
+          pushEvent({ 
+            type: 'tx', 
+            level: 'info', 
+            message: `New transaction: ${t.from || t.sender} → ${t.to || t.recipient}`, 
+            meta: { id: id.slice(0, 8), amount: t.amount } 
+          });
+        }
+      });
+
+      // Detect removed transactions (mined)
+      prev.forEach(oldId => {
+        if (!next.has(oldId)) {
+          pushEvent({
+            type: 'tx',
+            level: 'success',
+            message: 'Transaction mined',
+            meta: { id: oldId.slice(0, 8) }
+          });
+        }
       });
 
       prevMempoolRef.current = next;
       setMempool(txs);
-    } catch (e) {
+      
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.log('Mempool fetch failed:', error.message);
+      }
       setMempool([]);
     }
   };
 
   const fetchTopology = async (nodeUrl) => {
     try {
-      const res = await fetch(`${nodeUrl}/topology`, { timeout: 4000 });
-      if (!res.ok) throw new Error('No topology endpoint');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      
+      const res = await fetch(`${nodeUrl}/topology`, { 
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      
       const data = await res.json();
+      
       if (Array.isArray(data.nodes)) {
-        setTopology({ nodes: data.nodes, edges: data.edges || [] });
+        setTopology({ 
+          nodes: data.nodes, 
+          edges: data.edges || [] 
+        });
         return;
       }
-      throw new Error('Malformed topology');
-    } catch (e) {
+      throw new Error('Invalid topology format');
+      
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.log('Topology fetch failed, using fallback:', error.message);
+      }
+      
       // Fallback: derive topology from online nodes
       const online = nodes.filter(n => n.status === 'online');
       const center = online[0];
+      
       const derivedNodes = online.map((n, i) => ({ 
-        id: n.port, 
+        id: n.port.toString(), 
         url: n.url, 
         status: n.status, 
         label: n.name, 
         index: i 
       }));
-      const derivedEdges = center ? online.slice(1).map(n => ({ from: center.port, to: n.port })) : [];
+      
+      const derivedEdges = center ? 
+        online.slice(1).map(n => ({ from: center.port.toString(), to: n.port.toString() })) : 
+        [];
+        
       setTopology({ nodes: derivedNodes, edges: derivedEdges });
     }
   };
@@ -282,15 +366,74 @@ const FuturisticBlockchainDashboard = () => {
   const resolveConsensus = async (nodeUrl) => {
     try {
       setLoading(true);
-      const res = await fetch(`${nodeUrl}/nodes/resolve`);
-      if (res.ok) await fetchAllNodesData();
-    } catch (e) {
-      console.error('Consensus failed:', e);
+      
+      // First, try to trigger P2P consensus (this is what your blockchain actually uses)
+      const p2pResponse = await fetch(`${nodeUrl}/network/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (p2pResponse.ok) {
+        console.log('P2P sync initiated successfully');
+        // Wait a bit for P2P sync to complete
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await fetchAllNodesData();
+        return;
+      }
+      
+      // Fallback to legacy HTTP consensus if P2P sync endpoint doesn't exist
+      console.log('P2P sync not available, trying legacy HTTP consensus...');
+      const legacyResponse = await fetch(`${nodeUrl}/nodes/resolve`);
+      
+      if (legacyResponse.ok) {
+        console.log('Legacy HTTP consensus completed');
+        await fetchAllNodesData();
+      } else {
+        console.error('Both P2P and legacy sync failed');
+      }
+      
+    } catch (error) {
+      console.error('Sync failed:', error);
+      
+      // Try manual chain sync as last resort
+      try {
+        console.log('Attempting manual chain sync...');
+        await fetch(`${nodeUrl}/chain/sync`, { method: 'POST' });
+        await fetchAllNodesData();
+      } catch (manualError) {
+        console.error('Manual sync also failed:', manualError);
+      }
     } finally {
       setLoading(false);
     }
   };
-
+  const triggerP2PSync = async (nodeUrl) => {
+    try {
+      setLoading(true);
+      
+      // This calls the P2P consensus that your blockchain actually uses
+      const response = await fetch(`${nodeUrl}/p2p/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (response.ok) {
+        console.log('P2P consensus triggered successfully');
+        // Wait for P2P sync to propagate
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        await fetchAllNodesData();
+      } else {
+        throw new Error(`P2P sync failed with status: ${response.status}`);
+      }
+      
+    } catch (error) {
+      console.error('P2P sync error:', error);
+      // Fallback to regular refresh
+      await fetchAllNodesData();
+    } finally {
+      setLoading(false);
+    }
+  };
   const submitTransaction = async () => {
     if (!newTransaction.sender || !newTransaction.recipient || !newTransaction.amount) {
       alert('Please fill in all fields');
@@ -461,7 +604,7 @@ const FuturisticBlockchainDashboard = () => {
               WebkitTextFillColor: 'transparent',
               letterSpacing: '2px'
             }}>
-              ⟨ QUANTUM BLOCKCHAIN ⟩
+              Anbessa Blockchain
             </h1>
             <p style={{ color: '#888', margin: '0', fontSize: '1rem', letterSpacing: '1px' }}>
               NEURAL NETWORK CONSENSUS ENGINE
@@ -655,7 +798,9 @@ const FuturisticBlockchainDashboard = () => {
           {/* Global State */}
           {Object.keys(globalState).length > 0 && (
             <div style={{ ...glassStyle, padding: '25px', marginBottom: '20px' }}>
-              <h3 style={{ fontSize: '1.2rem', marginBottom: '20px', letterSpacing: '1px', color: '#ffffff' }}>⟨ GLOBAL STATE MATRIX ⟩</h3>
+              <h3 style={{ fontSize: '1.2rem', marginBottom: '20px', letterSpacing: '1px', color: '#ffffff' }}>
+                ⟨ GLOBAL STATE MATRIX ⟩
+              </h3>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '15px' }}>
                 {Object.entries(globalState).map(([address, balance]) => (
                   <div key={address} style={{
@@ -664,9 +809,60 @@ const FuturisticBlockchainDashboard = () => {
                     borderRadius: '8px',
                     border: '1px solid rgba(255, 255, 255, 0.2)'
                   }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ 
+                          fontSize: '12px', 
+                          color: '#888', 
+                          marginBottom: '5px',
+                          fontWeight: '600',
+                          letterSpacing: '1px' 
+                        }}>
+                          ACCOUNT
+                        </div>
+                        <div style={{
+                          fontFamily: 'monospace',
+                          fontSize: '13px',
+                          color: '#fff',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          maxWidth: '200px'
+                        }}>
+                          {address.length > 15 ? `${address.slice(0, 8)}...${address.slice(-6)}` : address}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ 
+                          fontSize: '12px', 
+                          color: '#888', 
+                          marginBottom: '5px',
+                          fontWeight: '600',
+                          letterSpacing: '1px' 
+                        }}>
+                          BALANCE
+                        </div>
+                        <div style={{ 
+                          fontSize: '18px', 
+                          fontWeight: '700', 
+                          color: '#00ff88' 
+                        }}>
+                          {typeof balance === 'number' ? balance.toLocaleString() : balance}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 ))}
-                </div>
+              </div>
+              <div style={{ 
+                marginTop: '15px', 
+                fontSize: '12px', 
+                color: '#666', 
+                textAlign: 'center' 
+              }}>
+                Total Accounts: {Object.keys(globalState).length} • 
+                Total Supply: {Object.values(globalState).reduce((sum, bal) => sum + (typeof bal === 'number' ? bal : 0), 0).toLocaleString()}
+              </div>
             </div>
           )}
 
